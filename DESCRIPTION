@@ -1,0 +1,56 @@
+Package: TargetSureR
+Type: Package
+Title: siRNA Off-Target Annotation, Risk Ranking, Tissue and Species Analysis
+Version: 1.1.0
+Authors@R: person(given = "Shuai", family = "Ni",
+    role = c("aut", "cre"), email = "nishuai@wakerbio.com")
+Description: A modular toolkit for evaluating small interfering RNA (siRNA)
+    off-target effects. The package annotates candidate off-target sites from
+    either siRNA sequences or (transcript, position) inputs, enriches the
+    result with curated gene lists and tissue expression, and provides three
+    analytical modules: risk ranking against a background library, tissue
+    safety profiling using Genotype-Tissue Expression (GTEx) data, and
+    cross-species conservation scoring for animal model selection. Sequence
+    search of seed-mediated off-targets relies on the 'SeedMatchR' package
+    (Cazares et al. 2024) <doi:10.1093/bioadv/vbae002>.
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+Depends:
+    R (>= 4.1.0)
+Imports:
+    dplyr,
+    tibble,
+    tidyr,
+    readr,
+    rlang
+Suggests:
+    SeedMatchR (>= 1.1.0),
+    Biostrings,
+    ensembldb,
+    AnnotationHub,
+    AnnotationFilter,
+    GenomicRanges,
+    GenomicFeatures,
+    GenomeInfoDb,
+    BSgenome.Hsapiens.UCSC.hg38,
+    BiocGenerics,
+    IRanges,
+    S4Vectors,
+    biomaRt,
+    httr2,
+    ggplot2,
+    scales,
+    pheatmap,
+    ggrepel,
+    cowplot,
+    purrr,
+    RColorBrewer,
+    testthat (>= 3.0.0),
+    knitr,
+    rmarkdown
+Config/testthat/edition: 3
+VignetteBuilder: knitr
+URL: https://github.com/nishuai/TargetSureR
+BugReports: https://github.com/nishuai/TargetSureR/issues
+Config/roxygen2/version: 8.0.0

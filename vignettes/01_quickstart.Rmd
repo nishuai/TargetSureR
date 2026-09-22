@@ -1,0 +1,892 @@
+---
+title: "Introduction to TargetSureR"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Introduction to TargetSureR}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment  = "#>",
+  # This vignette documents a workflow whose inputs are multi-gigabyte external
+  # downloads and network services, so nothing runs at build time: eval = FALSE
+  # here, and purl = FALSE on each chunk so that R CMD check does not execute
+  # the tangled script either.
+  eval     = FALSE,
+  fig.align = "center"
+)
+```
+
+# Introduction
+
+`TargetSureR` is a modular R toolkit for assessing the off-target risk of
+short interfering RNAs (siRNAs). The package combines transcriptome
+scanning, curated gene-list enrichment, multi-tissue expression context,
+and cross-species ortholog conservation into a single composite-score
+framework. A built-in cohort of 94 published human siRNAs ships inside
+the package and is used as a normalization reference, so that an
+investigator can place a single new candidate on a meaningful absolute
+scale rather than relying on within-batch ranking alone.
+
+This vignette walks through a complete first-time use, from installation
+through the construction of a local sequence database, evaluation of one
+candidate siRNA, and interpretation of the resulting tables and figures.
+
+# What you need before you start
+
+TargetSureR ships no genome, no transcriptome and no expression data. The
+package is the analysis logic; the reference data are external, and you
+assemble them once. **Read this section before running anything else** — it
+is the difference between a working installation and one that silently
+produces meaningless numbers.
+
+## The four external resources
+
+| Resource | Size | Needed for | Ships with package? |
+|---|---|---|---|
+| `BSgenome.Hsapiens.UCSC.hg38` | ~800 MB installed | Mode A scanning | No — Bioconductor |
+| `EnsDb` SQLite (Ensembl 113) | ~510 MB | Mode A and Mode B | No — AnnotationHub |
+| Tissue expression matrix | ~20 MB prepared | `tissue_safety()` | Simulated example only |
+| Ortholog table | ~200 KB | `species_match()` | Simulated example only |
+
+The last two deserve emphasis. `gtex_example` and `ortholog_table_example`
+contain **20 genes of invented numbers each**. They exist so that examples
+run offline. Scoring a real off-target set against them does not fail with an
+error — it returns a table in which almost every gene is unquantified, and
+the resulting ranking is arbitrary. Both must be replaced for any analysis
+whose output you intend to act on.
+
+Three curated gene lists (`ae_genes`, 35 symbols; `cancer_genes_v2`, 979;
+`immune_genes_immport`, 1,794; 2,632 unique in total) *are* bundled in full,
+so no download is needed for the `critical`-gene flags. Supply your own via
+the `gene_lists` argument of `enrich_annotations()` if your programme uses
+different panels.
+
+## A suggested layout
+
+Nothing in the package requires a particular directory. The examples in this
+vignette assume one folder holding the prepared files, with an R variable
+pointing at it, so that no path is written twice:
+
+```{r data-dir, purl = FALSE}
+# Adjust to wherever you keep reference data.
+TSR_DATA <- "~/TargetSureR_data"
+dir.create(TSR_DATA, recursive = TRUE, showWarnings = FALSE)
+```
+
+```
+~/TargetSureR_data/
+├── EnsDb.Hsapiens.v113.sqlite        # step 2, ~510 MB
+├── hg38_3UTR_annodb.rds              # step 3, built locally
+├── hg38_5UTR_annodb.rds              # step 3
+├── hg38_CDS_annodb.rds               # step 3
+├── gtex_median_tpm.tsv               # step 4, prepared from GTEx
+└── ortholog_biomart.csv              # step 5, from Ensembl BioMart
+```
+
+Everything below writes into `TSR_DATA`. Preparation is a one-time cost of
+roughly an hour, most of it download time; afterwards a session loads the
+cached files in seconds and needs no network.
+
+## What works without each resource
+
+You do not need all four to get started. The pipeline degrades in known ways:
+
+| You have | You can run | You cannot run |
+|---|---|---|
+| Package only | `normalize_guide()`, `compute_risk_score()`, column specs | anything requiring sequence scanning |
+| \+ BSgenome + EnsDb + annodb | `annotate_sites()`, `enrich_annotations()`, `rank_sirna()`, cohort percentiles | meaningful `tissue_safety()` or `species_match()` |
+| \+ expression matrix | `tissue_safety()`, `plot_tissue_heatmap()`, `plot_gene_attention()` | meaningful `species_match()` |
+| \+ ortholog table | `species_match()`, all cross-species figures | — |
+
+Note that `rank_sirna()` and its cohort percentiles work as soon as scanning
+does: the 94-siRNA `reference_set` is bundled in full and needs no download.
+
+# Installation
+
+## Core dependencies
+
+The package relies on a small set of CRAN packages for tabular and
+plotting work:
+
+```{r install-cran, purl = FALSE}
+pkgs <- c(
+  "dplyr", "tibble", "tidyr", "readr", "rlang",
+  "ggplot2", "scales", "ggrepel", "RColorBrewer", "httr2"
+)
+
+install.packages(setdiff(pkgs, installed.packages()[, "Package"]))
+invisible(lapply(pkgs, library, character.only = TRUE))
+
+```
+
+Bioconductor packages are required for sequence handling and Ensembl
+annotation. Because access to bioconductor.org may be unstable in some
+networks, a local mirror (Westlake or USTC) is recommended:
+
+```{r install-bioc, purl = FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+bioc_pkgs <- c(
+  "SeedMatchR", "Biostrings", "ensembldb",
+  "AnnotationHub", "AnnotationFilter",
+  "GenomicRanges", "GenomicFeatures", "GenomeInfoDb",
+  "BiocGenerics", "IRanges", "S4Vectors",
+  "biomaRt"            # step 5: ortholog download
+)
+
+# Install missing Bioconductor packages without updating existing ones
+BiocManager::install(setdiff(bioc_pkgs, installed.packages()[, "Package"]), update = FALSE)
+# Load all Bioconductor packages
+invisible(lapply(bioc_pkgs, library, character.only = TRUE))
+
+```
+
+`SeedMatchR` supplies the seed-scanning engine used in Mode A, and it needs a
+word of its own. CRAN carries version 1.1.1; version 2.0.0, used for the
+published analyses, is distributed through the authors' GitHub repository and
+requires R >= 4.3.0. If `BiocManager::install("SeedMatchR")` gives you 1.1.1,
+or nothing at all on a recent R, install from source:
+
+```{r install-seedmatchr, purl = FALSE}
+packageVersion("SeedMatchR")   # check what you actually have
+
+# remotes::install_github("tacazares/SeedMatchR")
+```
+
+Both versions expose the functions TargetSureR calls, so 1.1.1 works. Record
+which one you used: the seed-matching engine is part of what determines a site
+count.
+
+## Step 1: the reference genome
+
+The GRCh38 genome sequence arrives as a Bioconductor annotation package,
+`BSgenome.Hsapiens.UCSC.hg38` (about 800 MB installed). The analyses
+published with this package used version 1.4.5.
+
+```{r install-bsgenome, purl = FALSE}
+# Option A: install through Bioconductor (preferred)
+BiocManager::install("BSgenome.Hsapiens.UCSC.hg38")
+packageVersion("BSgenome.Hsapiens.UCSC.hg38")   # 1.4.5 in the published analyses
+```
+
+A single-session install of this size fails on some networks. The tarball can
+instead be fetched with a browser or download manager, then installed from
+wherever it landed:
+
+```{r install-bsgenome-local, eval = FALSE, purl = FALSE}
+# Download from the annotation-package index for your Bioconductor release:
+#   https://bioconductor.org/packages/release/data/annotation/
+# then install the local file:
+install.packages(
+  file.path(TSR_DATA, "BSgenome.Hsapiens.UCSC.hg38_1.4.5.tar.gz"),
+  repos = NULL, type = "source")
+```
+
+## Installing TargetSureR
+
+```{r install-pkg, purl = FALSE}
+# install.packages("remotes")
+remotes::install_github("nishuai/TargetSureR")
+library(TargetSureR)
+packageVersion("TargetSureR")   # 1.1.0
+```
+
+# Preparing the reference data
+
+## Step 2: the Ensembl annotation snapshot
+
+Transcript coordinates come from an `EnsDb` SQLite file, about 510 MB. The
+published analyses used **Ensembl release 113**, distributed through
+AnnotationHub as record **`AH119325`** ("Ensembl 113 EnsDb for Homo sapiens",
+added 2024-10-28).
+
+Pinning a release matters for reproducibility: site counts are relative to a
+particular transcript set, so a different release gives different numbers. A
+newer release is a legitimate choice, but record which one you used.
+
+```{r ensdb-hub, purl = FALSE}
+library(AnnotationHub)
+ah <- AnnotationHub()
+
+# Find the record for the release you want
+query(ah, c("EnsDb", "Homo sapiens", "113"))
+
+# Retrieve it (first call downloads; later calls read the cache)
+edb <- ah[["AH119325"]]
+ensembldb::ensemblVersion(edb)   # 113
+```
+
+### If the AnnotationHub download fails
+
+On constrained networks this download frequently stops partway and leaves a
+truncated file, which then fails to open as a database. The file is a plain
+SQLite database served over HTTPS, so it can be fetched directly with a
+browser or a resumable download tool and opened by path. This is the route
+used to produce the published analyses.
+
+```{r ensdb-manual, purl = FALSE}
+# 1. Resolve the download URL for the record (run once, with network access):
+#      ah <- AnnotationHub::AnnotationHub()
+#      AnnotationHub::hubUrl(ah)          # the hub endpoint
+#      mcols(ah["AH119325"])              # record metadata
+#
+#    Or browse the AnnotationHub record listing and copy the URL for
+#    AH119325 from there.
+#
+# 2. Download it with a resumable client, e.g.
+#      curl -L -C - -o EnsDb.Hsapiens.v113.sqlite <url>
+#
+# 3. Place it in TSR_DATA and open it by path:
+
+ensdb_path <- file.path(TSR_DATA, "EnsDb.Hsapiens.v113.sqlite")
+edb <- ensembldb::EnsDb(ensdb_path)
+
+# Confirm you have the release you think you have
+ensembldb::ensemblVersion(edb)   # 113
+ensembldb::organism(edb)         # "Homo sapiens"
+```
+
+Verify the file before relying on it: a truncated download often opens
+without complaint and then fails mid-analysis.
+
+```{r ensdb-verify, purl = FALSE}
+file.size(ensdb_path) / 1024^2        # expect roughly 510 MB
+length(ensembldb::transcripts(edb, columns = "tx_id")$tx_id)  # ~250,000
+```
+
+Note that `AnnotationHub` caches into a platform-specific directory
+(`tools::R_user_dir("AnnotationHub", "cache")` reports it), which differs
+between Windows, macOS and Linux. Keeping your own copy under `TSR_DATA` and
+passing `ensdb_path` explicitly avoids depending on that location, and makes
+a script portable between machines.
+
+## Step 3: the transcript sequence index (`annodb`)
+
+Sequence-mode scanning (Mode A) needs transcript *sequences*, not just
+coordinates. `build_annodb()` combines the two inputs above into the object
+`annotate_sites()` expects, one per feature class: 3'UTR, 5'UTR or CDS.
+
+Building takes roughly 25 seconds per class, so cache the result and reload
+it in later sessions.
+
+```{r build-annodb, purl = FALSE}
+annodb_3utr <- build_annodb("3UTR", ensdb_path = ensdb_path)
+annodb_5utr <- build_annodb("5UTR", ensdb_path = ensdb_path)
+annodb_cds  <- build_annodb("CDS",  ensdb_path = ensdb_path)
+
+saveRDS(annodb_3utr, file.path(TSR_DATA, "hg38_3UTR_annodb.rds"), compress = "xz")
+saveRDS(annodb_5utr, file.path(TSR_DATA, "hg38_5UTR_annodb.rds"), compress = "xz")
+saveRDS(annodb_cds,  file.path(TSR_DATA, "hg38_CDS_annodb.rds"),  compress = "xz")
+```
+
+With Ensembl 113 this yields 19,022 3'UTR, 18,973 5'UTR and 19,355 coding
+sequences. Four filters produce those counts, and because every downstream
+count is relative to this transcript set, all four have to match for a
+published number to be reproducible:
+
+1. protein-coding transcripts only;
+2. sequence names restricted to `1:22`, `X`, `Y`, `MT`, dropping scaffolds
+   and patch contigs;
+3. one transcript per gene, the longest **within that feature class**;
+4. sequences shorter than 8 nt dropped, a 7-nt seed being unlocatable in them.
+
+Filter 3 has a consequence worth noting: a gene can contribute a different
+representative transcript to each of the three classes, so a per-gene site
+count summed across classes is an upper bound on the number of distinct
+positions. `?build_annodb` documents all four, and each is adjustable.
+
+Three feature classes are built because `risk_score` derives jointly from
+`region` (CDS = 5, 3' UTR = 3, 5' UTR = 1) and `match_type` (full
+complementarity = +2). Scanning only one class confines hits to a single
+region, and the four risk-score classes (1, 3, 5, 7) cannot all be observed.
+The built-in `reference_set` was built by scanning all three for each of the
+94 reference siRNAs.
+
+After the initial build, later sessions only load:
+
+```{r load-annodb, purl = FALSE}
+annodb_3utr <- readRDS(file.path(TSR_DATA, "hg38_3UTR_annodb.rds"))
+annodb_5utr <- readRDS(file.path(TSR_DATA, "hg38_5UTR_annodb.rds"))
+annodb_cds  <- readRDS(file.path(TSR_DATA, "hg38_CDS_annodb.rds"))
+length(annodb_3utr$seqs)   # 19022
+```
+
+## Step 4: tissue expression
+
+Steps 4 and 5 prepare annotation tables that are joined to results *after*
+scanning. The downloads are independent of your siRNAs, so they can be done
+now; the code that consumes them appears under
+\dQuote{Downstream analysis} below. Step 5 additionally needs the gene list
+your own scan produces, so its download is best run once you have results.
+
+`tissue_safety()` and the tissue figures need a median-expression matrix:
+first column `gene_symbol`, one numeric column per tissue. Without one, the
+bundled `gtex_example` is used — 20 genes of simulated values, enough for the
+examples below and useless for analysis.
+
+The published analyses used the GTEx v10 gene median TPM file
+(`GTEx_Analysis_v10_RNASeQCv2.4.2_gene_median_tpm.gct`, 59,033 genes across
+68 tissues), downloaded from the GTEx portal's datasets page
+(<https://gtexportal.org/home/downloads/adult-gtex>) under **Bulk tissue
+expression**. GTEx requires no registration for these summary files.
+
+The GCT format needs a small conversion: three header lines, then one row per
+versioned Ensembl gene ID with the symbol in column 2. Several IDs can map to
+one symbol, so rows are collapsed per symbol. The published analyses took the
+**per-tissue maximum**, which keeps the highest reported value for a symbol
+rather than diluting it with unexpressed paralogous entries.
+
+```{r gtex-prepare, purl = FALSE}
+gct <- file.path(TSR_DATA, "GTEx_Analysis_v10_RNASeQCv2.4.2_gene_median_tpm.gct")
+
+# Header: line 1 version tag, line 2 dimensions, line 3 column names
+tissues <- strsplit(readLines(gct, n = 3)[3], "\t")[[1]][-(1:2)]
+raw <- readr::read_tsv(gct, skip = 3, col_names = c("gene_id", "gene_symbol", tissues),
+                       show_col_types = FALSE)
+
+gtex <- raw |>
+  dplyr::filter(!is.na(.data$gene_symbol), nzchar(.data$gene_symbol)) |>
+  dplyr::select(-"gene_id") |>
+  dplyr::summarise(dplyr::across(dplyr::everything(), ~ max(.x, na.rm = TRUE)),
+                   .by = "gene_symbol")
+
+readr::write_tsv(gtex, file.path(TSR_DATA, "gtex_median_tpm.tsv"))
+dim(gtex)   # 57853 x 69  (gene_symbol + 68 tissues)
+```
+
+Record the source file's checksum alongside the output, so a result can be
+traced to the exact input:
+
+```{r gtex-checksum, purl = FALSE}
+tools::md5sum(gct)
+```
+
+In later sessions, load the prepared file and pass it wherever the pipeline
+takes an expression matrix. `sites` is produced by the scanning step covered
+below, so this is the call you will make once you reach it:
+
+```{r gtex-use, purl = FALSE}
+gtex <- readr::read_tsv(file.path(TSR_DATA, "gtex_median_tpm.tsv"),
+                        show_col_types = FALSE)
+
+# enriched <- enrich_annotations(sites, expression_matrix = gtex)
+```
+
+Genes absent from the matrix receive `NA`, not zero, keeping "expression
+unknown" distinct from "measured as zero". Pass `fill_missing_tpm = 0` to
+change that. Any tissue column name may then be given as
+`primary_tissue`, so the names in your matrix determine the choices
+available.
+
+A different atlas works equally well — the function requires only the
+`gene_symbol`-plus-tissues shape. A programme with in-house RNA-seq from the
+tissues its formulation actually reaches is better served by that than by a
+population atlas.
+
+## Step 5: cross-species orthologs
+
+`species_match()` needs a table keyed by `human_symbol`, with two columns per
+species: `{species}_ortholog_type` and `{species}_identity_pct`. Without one,
+the bundled `ortholog_table_example` is used — again 20 genes of simulated
+values, and genes outside it score zero, which drags any real result towards
+zero.
+
+The table is a BioMart download. Only the genes you actually score are
+needed, which keeps it small: the published analyses covered 2,143 genes in a
+201 KB file. Query in batches, since a single request carrying thousands of
+symbols exceeds the server's URL limit.
+
+```{r ortholog-download, purl = FALSE}
+library(biomaRt)
+
+species <- c(mouse = "mmusculus", rat = "rnorvegicus",
+             cyno  = "mfascicularis", rhesus = "mmulatta",
+             rabbit = "ocuniculus", dog = "clfamiliaris")
+
+# The genes to score: the critical off-targets from your own run. Run this
+# after the scanning and enrichment steps below have produced `enriched`.
+critical <- enriched |>
+  dplyr::filter(.data$cancer_gene_v2 | .data$AE_gene | .data$immune_gene_immport) |>
+  dplyr::distinct(human_symbol = toupper(.data$gene_name)) |>
+  dplyr::arrange(.data$human_symbol)
+
+mart <- useEnsembl("genes", dataset = "hsapiens_gene_ensembl")
+
+fetch_species <- function(prefix, genes, batch = 250L) {
+  idx <- split(seq_along(genes), ceiling(seq_along(genes) / batch))
+  out <- lapply(idx, function(i) getBM(
+    attributes = c("external_gene_name",
+                   paste0(prefix, "_homolog_orthology_type"),
+                   paste0(prefix, "_homolog_perc_id")),
+    filters = "hgnc_symbol", values = genes[i], mart = mart))
+  z <- dplyr::bind_rows(out)
+  names(z) <- c("human_symbol", "ortholog_type", "identity_pct")
+  # BioMart may return co-orthologs: prefer one2one, else highest identity.
+  z |>
+    dplyr::mutate(human_symbol = toupper(.data$human_symbol),
+                  ortholog_type = sub("^ortholog_", "", .data$ortholog_type)) |>
+    dplyr::arrange(.data$human_symbol,
+                   dplyr::desc(.data$ortholog_type == "one2one"),
+                   dplyr::desc(.data$identity_pct)) |>
+    dplyr::slice_head(n = 1L, by = "human_symbol")
+}
+
+ortholog <- critical
+for (sp in names(species)) {
+  z <- fetch_species(species[[sp]], critical$human_symbol)
+  names(z)[2:3] <- paste0(sp, c("_ortholog_type", "_identity_pct"))
+  ortholog <- dplyr::left_join(ortholog, z, by = "human_symbol")
+}
+# Genes BioMart could not resolve: mark explicitly, they score zero.
+for (sp in names(species)) {
+  col <- paste0(sp, "_ortholog_type")
+  ortholog[[col]][is.na(ortholog[[col]])] <- "none"
+}
+
+readr::write_csv(ortholog, file.path(TSR_DATA, "ortholog_biomart.csv"))
+```
+
+```{r ortholog-use, purl = FALSE}
+ortholog <- readr::read_csv(file.path(TSR_DATA, "ortholog_biomart.csv"),
+                            show_col_types = FALSE)
+species <- species_match(enriched, ortholog_table = ortholog,
+                         candidates = c("mouse","rat","cyno","rhesus","rabbit","dog"))
+```
+
+Two points on interpretation. Homology attributes are not uniform across
+Ensembl releases: release 113 does not expose human-to-rat or
+human-to-rabbit homology, so the published analyses scanned against 113 while
+downloading homology from Ensembl Genes 116. Record both versions if they
+differ. And conservation is assessed per gene, at the level of ortholog
+identity — not at the individual binding site, so a conserved gene whose
+seed-matching window differs between species still scores highly.
+
+For a quick look at a single siRNA against the 3' UTR (which dominates
+the off-target landscape in practice), passing only the 3' UTR `annodb`
+is sufficient. To reproduce the four-class risk distribution shown in
+the reference cohort plots, all three feature classes need to be scanned
+and their results concatenated (Section 5.2 shows the pattern).
+
+# The reference cohort
+
+The package ships with `reference_set`, a compact summary of the
+off-target landscape of 94 published human siRNAs curated from the
+MIT/ICBP siRNA Database. All guides are 19 nt, normalized with
+`normalize_guide()`, which strips the written-out `dTdT` overhang and caps
+the length from the 3' end. It contains per-siRNA aggregate metrics,
+per-dimension percentile thresholds for normalization, a
+species × siRNA conservation matrix, and a per-siRNA risk-score
+distribution. It does not contain the underlying per-site hit table —
+that material is regenerated from `data-raw/build_reference_set.R`
+when needed.
+
+```{r reference, purl = FALSE}
+str(reference_set, max.level = 1)
+
+reference_set$n_siRNAs            # 94
+head(reference_set$metadata, 3)   # siRNA_name, guide, target_gene, ...
+head(reference_set$metrics, 3)    # count endpoints + composite_score
+reference_set$tier_thresholds     # min/max/Q25/Q50/Q75 per dimension
+```
+
+## Preparing your own siRNA
+
+`annotate_sites()` requires the **guide (antisense)** strand, because it
+searches the transcriptome for `reverseComplement(sequence)`. Passing a
+sense strand does not raise an error — it returns a plausible-looking
+table of seed-only hits with no on-target match. Run your sequences
+through `normalize_guide()` first, both to fix the strand and to land on
+the same 19 nt convention as the reference cohort:
+
+```{r normalize, eval = FALSE, purl = FALSE}
+# A published 21-mer guide: capped to 19 nt from the 3' end
+normalize_guide("UCCAUAACUUCUUGCUAAGUC")
+#> "UCCAUAACUUCUUGCUAAG"
+
+# Only the sense strand to hand? Ask for the reverse complement
+normalize_guide("GUUUUCACUCCAGCUAACAdTdT", input_strand = "sense")
+#> "UGUUAGCUGGAGUGAAAAC"
+```
+
+Sanity check after scanning: a correctly oriented guide produces a
+`full_complementarity` hit with `n_mismatch == 0` on its own target gene.
+If no such row appears, the strand is probably reversed.
+
+The reference set is the basis for all functions that compare a new
+siRNA against a meaningful background distribution: `rank_sirna()` uses
+its `tier_thresholds` for normalization, and several plotting helpers
+overlay reference data behind the user's results (Section 6).
+
+# Three input modalities
+
+TargetSureR accepts three distinct input types and dispatches each to a
+different backend.
+
+## Mode A, single siRNA: from a guide sequence
+
+When the investigator has a candidate guide sequence and wants to know
+its genome-wide off-target profile, the input is a list with two named
+elements. The simplest case scans only the 3' UTR:
+
+```{r mode-a-single, purl = FALSE}
+sites_3utr <- annotate_sites(
+  input    = list(siRNA_name = "Patisiran",
+                  sequence   = "AUGGAAUACUCUUGGUUAC"),
+  mode     = "sequence",
+  annodb   = annodb_3utr,
+  save_raw = "patisiran_out/raw"
+)
+sites_5utr <- annotate_sites(
+  input    = list(siRNA_name = "Patisiran",
+                  sequence   = "AUGGAAUACUCUUGGUUAC"),
+  mode     = "sequence",
+  annodb   = annodb_5utr,
+  save_raw = "patisiran_out/raw"
+)
+sites_cds <- annotate_sites(
+  input    = list(siRNA_name = "Patisiran",
+                  sequence   = "AUGGAAUACUCUUGGUUAC"),
+  mode     = "sequence",
+  annodb   = annodb_cds,
+  save_raw = "patisiran_out/raw"
+)
+sites_combined=rbind(sites_3utr, sites_5utr, sites_cds)
+dim(sites_combined)
+```
+
+Internally, the function runs two scans on the transcriptome contained
+in `annodb`: a seed-based scan via `SeedMatchR` (using the canonical
+mer7m8 seed, positions 2–8 of the guide), and a full-length scan via
+`Biostrings::vmatchPattern` allowing up to three mismatches. Hits from
+both scans are merged with a deduplication priority that favors
+full-complementarity matches over seed-only matches.
+
+The returned tibble has thirteen columns: ten core fields shared with
+Mode B (`siRNA_name`, `siRNA`, `strand`, `transcript`, `gene_name`,
+`biotype`, `position`, `region`, `match_type`, `risk_score`) plus three
+sequence-specific fields:
+
+| Column | Description |
+|---|---|
+| `target_site` | mRNA subsequence at the hit, RNA notation, same length as the guide |
+| `n_mismatch` | mismatches between guide reverse-complement and `target_site` |
+| `alignment` | three-line text alignment (guide / target / match line) |
+
+A separate file `raw_<siRNA_name>.tsv` is written under `save_raw/` and
+preserves every individual hit from each scan engine, before merging.
+This is the audit trail for the analysis.
+
+## Mode A, multiple siRNAs: candidate-set screening
+
+To screen N candidate siRNAs simultaneously, iterate over a list of
+inputs and concatenate the results before any downstream step. The
+example below scans each candidate against all three feature classes
+(3' UTR, 5' UTR, CDS) so that the resulting hit table covers the full
+range of risk-score values:
+
+```{r mode-a-batch, purl = FALSE}
+sirna_list <- list(
+  list(name = "cand_01", seq = "AUGGAAUACUCUUGGUUAC"),
+  list(name = "cand_02", seq = "UCCUGUUGCUGAGUAUCAU"),
+  list(name = "cand_03", seq = "GUACCUGGAUAUACUAAGA")
+)
+
+feat_dbs <- list(`3UTR` = annodb_3utr,
+                 `5UTR` = annodb_5utr,
+                 `cds`  = annodb_cds)
+
+sites_list <- list()
+for (s in sirna_list) {
+  per_feat <- lapply(names(feat_dbs), function(feat) {
+    annotate_sites(
+      input        = list(siRNA_name = s$name, sequence = s$seq),
+      mode         = "sequence",
+      annodb       = feat_dbs[[feat]],
+      feature_type = feat)
+  })
+  sites_list[[s$name]] <- dplyr::bind_rows(per_feat)
+}
+sites <- dplyr::bind_rows(sites_list)
+```
+
+A single concatenated `sites` object then feeds the rest of the
+pipeline. Combining the per-siRNA results before enrichment ensures
+that downstream summaries — particularly `rank_sirna()` —
+operate over the entire batch rather than per-call. For a single-siRNA
+analysis where a 3' UTR scan is sufficient, the inner loop over
+`feat_dbs` collapses to a single `annotate_sites()` call.
+
+## Mode B: from pre-computed (transcript, position) coordinates
+
+When upstream pipelines have already produced a list of off-target
+coordinates, Mode B annotates them using a local `EnsDb` snapshot, with
+optional fallback to the Ensembl REST API for transcript identifiers
+released after the local snapshot. The input is a data frame:
+
+```{r mode-b, purl = FALSE}
+input_b <- data.frame(
+  siRNA_name = c("hsiR22", "hsiR22", "hsiR21"),
+  transcript = c("ENST00000426385.4",
+                  "ENST00000335508.11",
+                  "ENST00000380152.7"),
+  position   = c(379L, 3136L, 500L)
+)
+
+sites_2 <- annotate_sites(
+  input              = input_b,
+  mode               = "position",
+  ensdb_path         = ensdb_path,   # from step 2
+  rest_fallback      = TRUE,
+  with_lookup_source = TRUE
+)
+```
+
+Because the input contains no nucleotide information, Mode B does not
+populate `target_site`, `n_mismatch`, or `alignment`. Setting
+`with_lookup_source = TRUE` adds an extra column that records whether
+each transcript was resolved from the local EnsDb (`"ensdb"`), the REST
+fallback (`"rest"`), or could not be resolved at all (`"unresolved"`).
+
+# Downstream analysis
+
+Once `sites` exists in either form, the rest of the pipeline is
+identical across input modes.
+
+## Annotation enrichment
+
+```{r enrich, purl = FALSE}
+# With your own expression matrix from step 4 (what an analysis should do)
+enriched <- enrich_annotations(sites, expression_matrix = gtex)
+
+# Omitting it falls back to the 20-gene simulated example: fine for a
+# first look at the table's shape, not for interpreting expression.
+enriched_demo <- enrich_annotations(sites)
+attr(enriched_demo, "genes_missing_expression")   # most of them
+```
+
+This step joins three curated gene-list flags (`AE_gene`,
+`cancer_gene_v2`, `immune_gene_immport`) and one column per tissue to each
+off-target site, producing the enriched table that is the basis for all
+scoring. The gene lists are bundled in full, so those flags are correct
+either way; only the expression columns depend on step 4. The
+`genes_missing_expression` attribute reports how many off-target genes the
+matrix did not cover — with the example matrix this is nearly all of them,
+which is the signal that the expression columns cannot be interpreted.
+
+## Composite risk ranking
+
+```{r rank, purl = FALSE}
+ranking <- rank_sirna(enriched)            # default: reference = "builtin"
+ranking <- rank_sirna(enriched, reference = "self")  # within-batch only
+```
+
+`rank_sirna()` summarizes seven per-siRNA metrics (high-risk hits in
+critical genes, total critical-gene hits, full-complementarity in CDS,
+total full-complementarity, total CDS hits, total high-risk hits, and
+seed-region hits in 3' UTRs), normalizes them against either the
+built-in reference cohort or the input batch itself, applies the
+weights returned by `default_weights()`, and bins the resulting
+composite score into Low / Medium / High / Critical tiers.
+
+A single new siRNA processed under `reference = "builtin"` therefore
+receives an interpretable absolute score — its position relative to the
+94-siRNA reference distribution. The same input under
+`reference = "self"` would yield a composite of zero, because there is
+no within-batch variance.
+
+## Tissue safety profile
+
+```{r tissue, purl = FALSE}
+tissue <- tissue_safety(enriched, primary_tissue = "Nerve_Tibial")
+head(tissue, 10)
+```
+
+This produces a per-gene `bio_attention` score that combines four
+components: normalized tissue TPM, normalized maximum risk-score,
+normalized rate of full-complementarity in CDS, and a binary critical-
+gene indicator.
+
+## Animal-model recommendation
+
+```{r species, purl = FALSE}
+species <- species_match(
+  enriched,
+  ortholog_table = ortholog,          # from step 5
+  candidates = c("mouse","rat","cyno","rhesus","rabbit","dog"))
+species$species_score
+species$recommendation
+```
+
+For each siRNA, the ortholog conservation score is computed across
+critical-gene hits in each candidate species, and the species with the
+highest score is reported. Each unique gene contributes once, so genes
+carrying several sites are not weighted more heavily.
+
+Omitting `ortholog_table` falls back to the 20-gene simulated example, in
+which genes outside those 20 resolve to no ortholog and score zero. The
+resulting scores reflect the example table's coverage rather than real
+conservation, so step 5 is a prerequisite for using this output. Species
+recommendation is in any case one input among several: exposure, historical
+database and lesion relevance also bear on the decision.
+
+## One-call report bundle
+
+```{r report, purl = FALSE}
+generate_report(
+  enriched,
+  output_dir     = "patisiran_out",
+  target_sirnas  = "Patisiran",
+  primary_tissue = "Nerve_Tibial",
+  species_result = species,
+  with_figures   = TRUE
+)
+```
+
+The report bundle writes five CSV tables and ten figure files (six
+standard plots and four reference-cohort comparisons) to a target
+directory.
+
+# Plotting helpers
+
+Each helper returns a `ggplot` object that can be saved with
+`ggplot2::ggsave()`, modified with additional layers, or composed with
+other plots through e.g. `cowplot::plot_grid()`.
+
+## Standard plots
+
+```{r plots-standard, purl = FALSE}
+plot_ranking_bar(ranking)
+plot_risk_distribution(enriched)
+plot_gene_attention(tissue, top_n = 30)
+plot_species_heatmap(species)
+plot_tissue_heatmap(enriched, tissue)
+plot_critical_bubble(enriched, tissue)
+```
+
+## Reference-cohort comparison plots
+
+These four helpers overlay or combine the user's results with the
+built-in 94-siRNA reference cohort.
+
+```{r plots-reference, purl = FALSE}
+# Composite-score violin: 94 reference siRNAs as gray jitter,
+# user siRNA as a colored diamond, Q25/Q50/Q75 annotated as dashed lines
+plot_ranking_bar(ranking, reference = "builtin")
+
+# All-cohort risk-score stacked bars: 94 reference + user side-by-side,
+# user bar outlined and labeled in red
+plot_risk_distribution(enriched, reference = "builtin")
+
+# Per-species conservation distribution (violin + jitter + diamond)
+plot_species_vs_reference(species, reference = "builtin")
+
+# Per-species percentile rank of the user siRNA against reference
+plot_species_percentile(species, reference = "builtin")
+```
+
+`generate_figures()` produces all standard and reference-comparison
+figures in one call:
+
+```{r generate-figures, purl = FALSE}
+generate_figures(
+  enriched, ranking, tissue, species,
+  output_dir     = "patisiran_out/figures",
+  formats        = c("pdf","png"),
+  with_reference = TRUE
+)
+```
+
+# An optional annotation step for sequence-only inputs
+
+When an investigator supplies only a guide sequence and a project name,
+the resulting `sites` table inherits the `gene_name` column directly
+from `annodb$gtf`, which records the longest annotated transcript per
+gene for the loaded feature class. In some downstream contexts —
+particularly when combining results across feature classes (3' UTR,
+5' UTR, CDS) — it is useful to verify these gene assignments against a
+separate biotype query, or to attach RefSeq accessions and HGNC symbols.
+A minimal annotation step looks as follows:
+
+```{r reannotate, purl = FALSE}
+library(ensembldb)
+library(AnnotationFilter)
+
+unique_tx <- unique(sites$transcript)
+meta <- transcripts(
+  edb,
+  filter      = TxIdFilter(unique_tx),
+  columns     = c("tx_id", "gene_name", "tx_biotype",
+                  "gene_biotype", "seq_name"),
+  return.type = "data.frame"
+)
+sites$gene_biotype <- meta$gene_biotype[match(sites$transcript, meta$tx_id)]
+sites$chr          <- meta$seq_name[match(sites$transcript, meta$tx_id)]
+```
+
+When transcript identifiers from a newer Ensembl release are not
+present in the local EnsDb, the same lookup can be obtained at runtime
+from the Ensembl REST API by setting `rest_fallback = TRUE` in
+`annotate_sites()`. The augmented columns can then be passed forward to
+`enrich_annotations()` without further changes.
+
+# Using a different reference cohort
+
+The bundled `reference_set` derives from the MIT/ICBP siRNA Database, whose
+144 human-reactive entries were filtered to the 94 synthetic duplexes,
+excluding 50 long-hairpin shRNA constructs. Two properties bound what its
+percentiles mean: the deposits are cell-biology reagents weighted towards
+cancer signalling, and the database was last updated in January 2009. A
+percentile therefore says a candidate is typical or atypical *among those
+reagents* — which is a different statement from safe. A programme working on
+conjugated hepatic or ocular siRNAs is better served by its own cohort.
+
+Substituting one means running the same pipeline over your own guides and
+passing the result as a custom reference:
+
+```{r custom-reference, purl = FALSE}
+# 1. Scan your cohort's guides exactly as in "Mode A, multiple siRNAs" above
+#    and enrich them, giving `cohort_enriched`. Normalise within the cohort:
+cohort_ranking <- rank_sirna(cohort_enriched, reference = "self")
+
+# 2. Derive the per-dimension min/max/quartiles that define the new scale.
+dims <- names(default_weights())
+tier_thresholds <- do.call(rbind, lapply(dims, function(d) {
+  v <- cohort_ranking[[d]]
+  data.frame(dimension = d, min = min(v), max = max(v),
+             q25 = quantile(v, 0.25, names = FALSE),
+             q50 = quantile(v, 0.50, names = FALSE),
+             q75 = quantile(v, 0.75, names = FALSE))
+}))
+
+my_reference <- list(metrics = cohort_ranking,
+                     tier_thresholds = tier_thresholds,
+                     n_siRNAs = nrow(cohort_ranking))
+
+# 3. Place your candidates against that cohort instead of the bundled one.
+ranking <- rank_sirna(enriched, reference = "custom",
+                      reference_set = my_reference)
+```
+
+Note `reference = "self"` at step 1: the default `"builtin"` would normalise
+your cohort against the bundled one and put the scores on a foreign scale.
+`reference_set` needs at minimum a `tier_thresholds` data frame with those six
+columns; supplying `metrics` as well lets the reference-overlay plots show
+your cohort's distribution rather than the bundled one.
+
+The script that produced the bundled set, `data-raw/build_reference_set.R`,
+is in the source repository but excluded from the installed package, and it
+reads a curated sequence table that is not redistributed with it. Treat it as
+a record of how the bundled cohort was made rather than a runnable recipe.
+End-to-end runtime was about an hour on one workstation, dominated by
+`SeedMatchR::SeedMatchR()` on the larger feature classes.
+
+# Session information
+
+```{r session, eval = TRUE}
+sessionInfo()
+```

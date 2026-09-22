@@ -1,0 +1,36 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+inst/doc
+doc/
+Meta/
+*.tar.gz
+*.log
+
+# Large regeneratable test outputs (the .R scripts produce these)
+data-raw/modeB_realtest_out/
+data-raw/modeB_realtest_v113_out/
+data-raw/modeB_batches_out/batch_1_full_v2_result.csv
+data-raw/hg38_3UTR_annodb.rds
+data-raw/hg38_5UTR_annodb.rds
+data-raw/hg38_CDS_annodb.rds
+data-raw/reference_set_build/
+demo_output/
+test_out/
+
+# AnnotationHub download cache (user-local)
+*.sqlite
+# One-off diagnostic and rebuild scratch (not part of the package)
+data-raw/_scratch/
+data-raw/_bak/
+data-raw/_fix/
+data-raw/check_*.R
+data-raw/inspect_*.R
+data-raw/list_target_attrs.R
+
+# built tarball and check output
+*.tar.gz
+*.Rcheck/
+verify_tar/
