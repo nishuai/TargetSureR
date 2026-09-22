@@ -1,4 +1,0 @@
-"siRNA_name","siRNA","strand","transcript","gene_name","biotype","position","region","match_type","risk_score"
-"hsiR_PMP22_lit","UCCUCUCCAUUUGAGAUAGUU","guide","ENST_NOISE1","NOISE1","protein_coding",150,"3'UTR","partial_match",3
-"hsiR_PMP22_lit","UCCUCUCCAUUUGAGAUAGUU","guide","ENST_PMP22_fake","PMP22","protein_coding",80,"3'UTR","full_complementarity",5
-"hsiR_PMP22_lit","UCCUCUCCAUUUGAGAUAGUU","guide","ENST_PMP22_fake","PMP22","protein_coding",93,"3'UTR","partial_match",3

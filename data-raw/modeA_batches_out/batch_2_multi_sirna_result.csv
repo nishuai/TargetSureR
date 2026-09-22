@@ -1,6 +1,0 @@
-"siRNA_name","siRNA","strand","transcript","gene_name","biotype","position","region","match_type","risk_score"
-"hsiR_A","AACCGGUUAACCGGUUAACCGG","guide","ENST_M01","GENE_M01","protein_coding",100,"3'UTR","full_complementarity",5
-"hsiR_A","AACCGGUUAACCGGUUAACCGG","guide","ENST_M01","GENE_M01","protein_coding",106,"3'UTR","partial_match",3
-"hsiR_A","AACCGGUUAACCGGUUAACCGG","guide","ENST_M01","GENE_M01","protein_coding",114,"3'UTR","partial_match",3
-"hsiR_B","UCCUCUCCAUUUGAGAUAGUU","guide","ENST_M02","GENE_M02","protein_coding",200,"3'UTR","full_complementarity",5
-"hsiR_B","UCCUCUCCAUUUGAGAUAGUU","guide","ENST_M02","GENE_M02","protein_coding",213,"3'UTR","partial_match",3
